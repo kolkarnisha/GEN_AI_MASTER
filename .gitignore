@@ -1,0 +1,51 @@
+.DS_Store
+
+# TypeScript / JavaScript / Node
+node_modules/
+/package-lock.json
+app/**/dist/
+*.tsbuildinfo
+
+# Bun
+bun.lockb
+.bun/
+
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+.coverage
+htmlcov/
+
+# Docker data directory
+/data/
+/logs/
+
+# Security
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Misc
+.superpowers/
+
+# Mockup screenshots — the HTML prototypes are tracked, but rendered PNGs
+# just bloat the repo every clone (users clone this on plugin install).
+docs/mockups/*.png
+
+# Backup & temp
+bak/
+
+.justfile.swp
+
+.tmp/
+
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+.worktrees/

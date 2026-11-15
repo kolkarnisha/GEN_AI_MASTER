@@ -1,0 +1,425 @@
+# Changelog
+
+## v0.9.12 — Security hardening and cross-platform fixes
+
+This release tightens default security by binding the server to loopback, restricting CORS, and rejecting cross-origin WebSocket connections. It also fixes running the dashboard on Windows and SELinux hosts, and improves structured output summaries.
+
+### Breaking Changes
+
+The server now binds to loopback (localhost) and restricts CORS by default, so the dashboard is no longer reachable from other machines or cross-origin pages out of the box. If you access the dashboard remotely or from a different origin, you'll need to explicitly configure the server's host binding and allowed origins to opt back in.
+
+### Features
+
+- Structured output summaries now include the field name for clearer context.
+
+### Fixes
+
+- Bind the server to loopback and restrict CORS by default to prevent unwanted network access.
+- Reject cross-origin WebSocket connections.
+- Correctly mount transcript directories on Windows and fix the health check's database path.
+- Relabel Docker bind mounts on SELinux hosts so containers can access them.
+- Render the agent combobox and session icons on unassigned sessions.
+
+### Other
+
+- Hardened the test suite (hermetic hook-autostart test, localStorage polyfill for jsdom on Node 26).
+- Bumped better-sqlite3 and applied Prettier formatting across the codebase.
+
+## v0.9.11 — NEW Constellation dashboard, Hermes agent support, and richer conversation threads
+
+This release introduces the fun new Constellation UI home-page view — an activity bubble visualization. It adds first-class support for Hermes agents, including dedicated event rendering, session stats, and model pricing, alongside a redesigned collapsible conversation thread with navigation and stable scrolling.
+
+### Features
+
+- Added the Constellation dashboard theme; it's now the default home-page view with a toggle to switch to previous List view.
+- Added first-class Hermes agent support: dedicated event rendering, session stats derived from events, a model pricing endpoint, and a Hermes agent plugin.
+- Redesigned the conversation thread to be collapsible with thread navigation, stable stream scrolling, and improved parity with the event stream.
+- Added rendering for claude's StructuredOutput tool events.
+- Added positional URL routing with a project segment derived from the session.
+- Made the active-session indicator duration configurable.
+
+### Fixes
+
+- Normalized epoch-seconds timestamps to milliseconds at ingest so event times display correctly.
+
+### Other
+
+- Improved routing performance by caching session lookups and bounding the route fallback set.
+
+## v0.9.10 — Subagent token attribution and Workflow event tracking
+
+This release adds token cost attribution for subagents and workflows, so the tokens they consume are now traced back to the prompt that triggered them. It also improves Workflow tool tracking by correctly pairing pre- and post-execution events and rendering their details in the dashboard.
+
+### Features
+
+- Subagent and workflow token costs are now attributed to the originating prompt, giving you accurate per-prompt cost breakdowns.
+
+## v0.9.9 — Stable database location across plugin upgrades
+
+This release keeps your event database in a stable location so it survives plugin upgrades, with expanded scanning to automatically migrate databases from older layouts. The dashboard now shows the host bind mount path, and the `/observe logs` command has been split into separate server, CLI, and MCP log views.
+
+Set `AGENTS_OBSERVE_LOCAL_DATA_ROOT` in `~/.claude/settings.json` to manually pin the location of the db if needed. See [README.md](https://github.com/simple10/agents-observe#data-location) for details.
+
+### Features
+
+- The database is now stored in a stable location that persists across plugin upgrades, with automatic detection and migration of databases from all previous layouts.
+- The dashboard Settings now displays the host bind mount path for the database.
+- `/observe logs` now splits output into separate `logs-server`, `logs-cli`, and `logs-mcp` views for easier troubleshooting.
+
+### Fixes
+
+- Event data is no longer lost when upgrading the plugin (#17).
+
+## v0.9.8 — Improvements to session transcript stats
+
+This release improves the accuracy of transcript file scanning for session Stats view.
+The session stats now work properly even when the session events were not captured.
+Transcript files are treated as authoritative when available with fallbacks to events parsing.
+
+### Features
+
+- Session stats and `/observe stats` now works for sessions where the plugin was not previously enabled.
+- Added a Date column to the prompts table for sorting.
+- Zero-call prompts now appear in the prompts table, styled muted.
+- Prompts card now shows a discrepancy indicator when transcript prompts count differs from events count.
+- Claude subagents are now included in stats even when subagent events were not captured.
+
+### Fixes
+
+- Prompt counting now keys off the user-line UUID and filters injected entries, eliminating duplicate and miscounted prompts.
+- Subagents are now discovered via a filesystem scan instead of a DB lookup, so they show up reliably.
+- Transcript cost math now skips claude's `<synthetic>` assistant messages, previously breaking Est. Cost calculations.
+- Memoized derived data in the stats panel for better performance.
+
+## v0.9.7 — Session transcript token stats and richer Stats tab
+
+This release introduces a major improvement in the session Stats view. Transcript-based token usage analytics with per-model breakdowns, subagent tracking, and canonical pricing. Requires the server to have read access to claude and codex transcript files. Now enabled by default.
+
+### Features
+
+- New Token Usage section in the Stats tab with per-model summaries, cost breakdowns, and fallback to events when transcripts are disabled
+- New prompts token usage in session Stats - clickable link auto scrolls to the prompt event
+- Cost breakdown tooltips on prompts and Est Cost cells with improved tooltip layout
+- Longest tool call now renders as a clickable link to its PreToolUse event
+- Codex transcript support with expanded test coverage
+- Event deduplication at `/events` ingestion via canonical-JSON signature hashing and a UNIQUE `signature_hash` column
+- `AskUserQuestion` event details now render the question, options, and answer
+- New `/observe view` and `/observe stats` skill commands open the browser to the current session
+- `AGENTS_OBSERVE_TRANSCRIPT_STATS` flag enabled by default, with Docker bind mount for `~/.claude/projects` and `~/.codex/sessions`
+- "All" filter exclusions: seed default-all filter hides `PostToolBatch`, gates Claude Code and default-agent events, and backfills missing seed filters on existing installs
+
+### Fixes
+
+- Filter out subagents with zero LLM activity from stats
+- Include subagents without transcript JSONLs as stub rows
+- Miscellaneous Stats tab revamp fixes
+
+### Other
+
+- Documentation: added session token usage image to README, plus design specs and implementation plans for transcript token stats, event deduplication, UI revamp, and All filter exclusions
+- Chore: simplified Codex hooks env, removed old Claude Observe references, added transcript-stats setting to Claude config, applied formatter
+
+## v0.9.6 — Hook path fix and test isolation
+
+This release fixes the UserPromptExpansion hook so it resolves correctly from the plugin root, and hardens the config test suite so it no longer depends on a real plugin install.
+
+Versions 0.9.1-0.9.5 should be upgraded. UserPromptExpansion hook is triggered when a skill is invoked that injects context into claude before reaching the LLM. The UserPromptExpansion events were not being logged properly.
+
+### Other
+
+- Isolated config tests from the real plugin install for more reliable test runs.
+
+## v0.9.5 — Customizable filters system
+
+This release introduces a complete Filters system in Settings, letting you create, edit, and manage custom event filters with a live-preview editor. All filters are now RE2-backed regex pattern matching. Default filters are seeded automatically.
+
+### Features
+
+- New **Filters** tab in Settings with editor for customizing filters.
+- Per-filter config including color, display style (primary/secondary), and pill-name templating.
+- Dynamic filter pill name support for hook name, tool name, and bash command
+- RE2-backed pattern matching (via `re2js`) for linear-time evaluation, with anchored user regexes and double-backtracking prefix avoidance.
+- Live preview pane showing matched substrings with surrounding context and per-pattern match highlighting.
+- Compiled filters are pinned at page load with a prompt to refresh when they change.
+- Full server + client plumbing: filters table, REST routes, WS messages, filter store, compiled-filter context threaded through event processing, and `event.filters` populated by the default and claude-code agents.
+
+### Usage Notes
+
+Filters are pre-configured regex searches. They make it easy to quickly filter the event stream to find events of interest. The new system supports filtering on the hook names, tool names, and raw event payloads for unlimited customization. The dynamic filter vars allow auto creating of filter pills based on tool name or bash command.
+
+The filter defaults preserve the behavior of previous releases but now supports full customization. Enjoy!
+
+## v0.9.4 — Improved logs modal search navigation
+
+This release enhances the logs modal search experience by visually highlighting rows that match the search query and enabling quick navigation from a matched row directly to the corresponding event in the stream.
+
+### Features
+
+- Highlight rows in the logs modal that contain a search match for easier visual scanning
+- Jump from a logs-modal row directly to the matching event in the stream
+
+## v0.9.3 — Searchable logs, three-layer contract refactor, worktree-aware projects, and performance improvements
+
+This release paves the way for adding full support for other agents like Codex and OpenClaw/Hermes.
+
+Release includes a major three-layer architectural refactor that cleanly separates the wire envelope, server, and client. Worktree sessions now automatically route into their parent project, and a wave of client-side fetch deduping noticeably reduces network chatter and improves performance.
+
+### Features
+
+- New Setup and PostToolBatch claude hook events
+- Added search to the raw event logs modal
+- Worktree sessions are now routed into their existing parent project
+- Added a global event icon registry with per-event customization
+- Added an Unassigned bucket in the sidebar for sessions without a project
+- Sidebar now shows live activity pings via broadcast pulse animation
+- Stop and SubagentStop events display runtime in both the row summary and detail pane, with date tooltips on rows
+- Settings modal UX cleanup with a new db-size footer
+
+### Fixes
+
+- Sidebar Unassigned bucket now refreshes after session mutations
+- Event count now displays on non-active sidebar session rows
+- Fixed nested-button HTML when a SessionRow had a notification
+- Errors and Config static filters now work correctly
+- Agent parent/child relationships are now derived from events
+- Tooltips no longer re-open on tab reactivation
+- Resolved API call regressions including a lazy-fetch storm and cache thrash
+- Skipped no-op agent metadata PATCHes and removed unnecessary polling on session/project queries
+
+### Other
+
+- Refactor: completed the three-layer contract migration across schema, server, and client (Phases 1–8), including rewritten hook libs for default/claude-code/codex agents, locked envelope types, and trimmed wire shapes
+- Docs and cleanup: added three-layer contract spec and plan, graduated implemented designs, removed dead endpoints and DB columns, and re-flowed whitespace via prettier
+
+## v0.9.2 — Keyboard navigation, Settings overhaul, and timeline perf
+
+This release significantly enhances CPU usage, adds keyboard navigation, and adds a rebuilt Settings experience featuring Projects, Labels, and Sessions management tabs. Session view gains region-jump shortcuts, arrow-key navigation in the sidebar and filter pills, and a smoother rewind-mode transition experience.
+
+### Features
+
+- Full keyboard navigation across sidebar, filter pills, and session items, with arrow-key support and region-jump shortcuts for the session view
+- New Keyboard tab in Settings listing all available shortcuts
+- Settings modal gains Sessions, Projects, and Labels tabs with sortable tables, per-project create/delete, and cross-tab label management
+- Transition spinner now appears when changing rewind-mode ranges
+- base64 images in tool responses are rendered inline in event details & redacted when over the size limit
+
+### Fixes
+
+- CPU usage reduced from 98% to ~12% for activity timeline animations
+- Session Stats no longer retains the events array in memory after exit
+- `useAgents` side-effect fetch moved out of `useMemo`
+
+### Other
+
+- Timeline performance: React.memo on DotContainer with content-aware equality, agent lane split into absolute siblings with shared tooltips, plus cleanup and perf guardrails
+
+## v0.9.1 — Configurable notifications and richer event handling
+
+**BREAKING CHANGE:** This release adds claude's new `UserPromptExpansion` hook. Be sure to update `claude code` to to the latest version before upgrading the plugin.
+
+This release introduces a new `AGENTS_OBSERVE_NOTIFICATION_ON_EVENTS` env var that lets you choose which hook events trigger notifications across Claude, Codex, and fallback CLIs. The dashboard now renders `UserPromptExpansion` events, pairs `PreCompact`/`PostCompact` into a single row, and keeps expanded rows in view when filtering. Event descriptors are now CLI-stamped with a `hook_name` field, and several timeline and filter bugs have been fixed.
+
+### Features
+
+- Configurable notification events via the new `AGENTS_OBSERVE_NOTIFICATION_ON_EVENTS` env var, honored by the Claude, Codex, and unknown-fallback hook libraries
+- Example `hooks.json` now enables notifications on Codex `Stop` events
+- Render claude `UserPromptExpansion` hook events in the dashboard timeline
+- Pair `PreCompact` and `PostCompact` into a single combined event row
+- Keep the last-expanded row in view when filters or search change
+- CLI-stamped event descriptors: events now carry a `hook_name` field (replaces `tool_use_id`)
+- Notification state is now driven by envelope flags, with trace logging for notification events
+
+### Fixes
+
+- Guard timeline-rewind and parser against poisoned timestamps
+- Static `Agents` filter now includes `SubagentStop` events
+- Resolve nested-button warning in the sidebar project row
+
+### Other
+
+- Enable `Notification` and `Stop` triggers in project settings and example configs
+- Drop unused notification count and dedup-hook dead code; refresh post-refactor comments
+- Add specs and implementation plans for configurable notifications, envelope flags, and CLI-stamped descriptors
+
+## v0.9.0 — Multi-agent support with Codex, notifications, and session bookmarking
+
+This release introduces a pluggable agent class registry with experimental Codex hook support, live notification indicators with an animated favicon and auto-dismiss, and session labels for cross-project bookmarking. Sessions now support forking, inline renaming from the sidebar, and browser back/forward navigation. Task events are grouped into a history view, MCP tool calls get distinct icon styling, and a new theme picker rounds out the settings modal.
+
+### Breaking Changes
+
+- The `getSessionInfo` callback is now agent-scoped and passes `agentClass`, `cwd`, and git metadata. The auto slug format changed to `<branch>:<uuidPrefix>:<agentShortName>` — integrators consuming the callback or parsing auto slugs will need to update to the new shape.
+
+### Features
+
+- Experimental Codex hook support and a new agent class registry that drives event rendering, filters, and UI hints per agent type
+- `AGENTS_OBSERVE_AGENT_CLASS` env var to tag sessions from the CLI; distinct `agentClasses[]` surfaced in session tooltips
+- Sidebar and main-panel notification indicators with auto-clear, auto-dismiss, and an animated favicon
+- Session labels for pinning and bookmarking sessions across projects
+- Fork command in the session modal details tab to resume a session as a new fork
+- Theme picker (light/dark/system) in the Settings Display tab
+- Dedup toggle in the Settings modal controlling event processing behavior
+- Task history view grouping events by `taskId` with pending/completed status and per-step descriptions
+- Double-click a session name in the sidebar to inline-rename it; click the name in the breadcrumb to copy the transcript path
+- Browser back and forward buttons now navigate between sessions, with forward history preserved
+- Bash tool call summaries show the parsed binary name as a distinct prefix
+- GPU-animated spinner on the Live/Rewind button during mode transitions
+- Projects are now resolved by `cwd`, with Codex date paths collapsed to `YYYY-MM-DD`
+
+### Fixes
+
+- Reliable auto-scroll to bottom and virtualizer reset when switching sessions
+- Rewind mode now uses a frozen event snapshot, preventing memory leaks from the live stream
+- Read events show file content and Edit events show the `structuredPatch` from the paired `PostToolUse`
+- Agent tool results now render from the paired `PostToolUse` payload
+- Icon and color customizations propagate immediately without triggering a re-render storm
+- Bash binary parser handles subshells, shell keywords, and validates output
+- Timeline dots no longer fail to appear mid-animation cycle, and re-scroll to bottom on tab visibility change when follow is on
+- Filter, search, and event detail rendering restored under the new agent class registry
+- Status icons now display correctly across all pending/running/completed/failed events, including task history
+- Dedup toggle persists to `localStorage` and reloads to avoid OOM
+
+### Other
+
+- Client rewired end-to-end through the agent class registry (event stream, framework components, event rendering) with a default `claude-code` agent module
+- Performance: incremental event processing, memoized rewind timeline, shared `EventStore` via React context, and icon resolution moved to render time
+- Styling and tooling cleanup: tool names inherit icon color, swapped Live/Rewind button colors, improved `check-hooks` script with blacklist/flagged output, and minor client formatting passes
+
+## v0.8.6 — Session stats and UI polish
+
+This release introduces a new session stats tab showing sub-agent token usage and session metrics at a glance. It also adds convenient copy buttons for event details and improves overall UI responsiveness with smoother scrolling and better click interactions.
+
+### Features
+
+- New session stats tab displaying token usage breakdowns and agent results with color-coded names and click-to-scroll navigation
+- Copy button on expanded event detail fields for quick clipboard access
+
+### Fixes
+
+- Sidebar clicks now always navigate to the selected session
+- Docker image includes python3 and build tools required for better-sqlite3 native compilation
+
+### Other
+
+- Improved scroll performance for expanded rows in the virtualizer
+- Refined UI interactions: cursor-pointer on session rows, fixed tooltip placement for timeline agents and dots
+
+## v0.8.5 — Performance fixes and API overhaul
+
+Removed WorktreeCreate hook from the plugin to prevent plugin from blocking worktree creation. Major performance improvements eliminate CPU spikes on large sessions. The REST API has been restructured with standardized error responses. New features include permission mode detection and a resume command in the session modal.
+
+### Breaking Changes
+
+- API error responses now use a standardized format — 3rd party clients parsing error bodies will need to update to the new shape
+- Project and agent endpoints have been restructured with new paths
+
+### Features
+
+- Permission mode detection with automatic client-side backfill for older sessions
+- Resume command and copy-to-clipboard in the session modal
+- `AGENTS_OBSERVE_ALLOW_DB_RESET` env var to guard the DELETE /data endpoint
+
+### Fixes
+
+- Removed WorktreeCreate hook and added safety checks to hook validation
+- Fixed WebSocket invalidation cascade causing 100%+ CPU on large sessions
+- Fixed timeline CPU usage and spinner freeze on large sessions
+- Timeline dots no longer disappear after returning from an inactive browser tab
+- Slug and name PATCH endpoints now validate non-empty strings
+
+### Other
+
+- Standardized API types, query param naming, and decoupled callbacks from REST session endpoints
+- Cleaned up legacy server API support
+
+## v0.8.2 — Timeline rewind, performance overhaul, and session editing
+
+This release introduces timeline rewind mode for replaying agent sessions, a session edit modal for inline renaming, and toast-based API error surfacing. Major performance work virtualizes the event stream, reduces memory retention, and eliminates expand lag — making the dashboard significantly snappier with large sessions.
+
+### Features
+
+- Timeline rewind mode for stepping through agent sessions frame by frame
+- Session edit modal for renaming sessions and projects inline
+- API errors now surface as toast notifications
+- Orphan repair and foreign-key auto-recovery for database integrity
+- Virtualized event stream for large sessions using `@tanstack/react-virtual`
+- Reduced memory retention for sessions with many events
+
+### Fixes
+
+- Pinned sessions, breadcrumbs, and project names now auto-update on rename
+- Fixed timeline CPU usage from unnecessary re-renders
+
+## v0.8.1 — Session management and richer event details
+
+This release adds the ability to move sessions between projects, edit session names inline, and copy transcript paths — all from a new session action column. Event details now render markdown and diffs, and Bash/Read tool expansions show more context. The client bundle was also cut nearly in half.
+
+### Features
+
+- Move sessions between projects via a new action column with drag-and-drop support
+- Copy JSONL transcript path button in session actions
+- Open project modal directly from the sidebar edit button
+- Session breadcrumb showing project, session name, and working directory
+- Markdown and diff rendering in expanded event details
+- Improved rendering for Bash, Read StopFailure, PostToolUseFailure, and PermissionRequest events
+- Configurable shutdown delay via `AGENTS_OBSERVE_SHUTDOWN_DELAY_MS`
+- Reduced client bundle from 1.27 MB to 749 KB with dynamic icon imports
+
+### Fixes
+
+- SubagentStop events now included in the Stop filter
+- Database migration dropping unused `events.summary` and `events.status` columns
+
+### Other
+
+- Sidebar polish: projects sorted alphabetically, improved session row UX, footer icons stack vertically when collapsed; sticky select-all bar and better changelog modal headings in the project modal
+- Cached event count, agent count, and last activity on the sessions table for faster queries
+
+## v0.8.0 — Session pinning, sorting, and CLI tooling
+
+This release adds several dashboard UI enhancements like session pinning and sort controls, making it easier to organize and find sessions. The CLI gains new commands like hook-sync and hook-autostart, and the `/observe` skill was enhanced with more subcommands and debugging tools. The plugin now checks server health during SessionStart events, sends a status message visible in claude, and auto repairs stopped servers.
+
+### Features
+
+- Pin sessions to the sidebar for quick access, with green indicators for active sessions
+- Sort sessions by recent activity or creation date in the sidebar, home page, and project page
+- Auto-collapse sidebar session groups when they exceed 10 items
+- In-app changelog modal with version checking
+- `observe logs` and `observe debug` CLI commands for troubleshooting
+- `hook-sync` and `hook-autostart` commands with fast container restart
+- Unified `/observe` skill with argument hints (merged observe and observe-status)
+- `db-reset` CLI command for clearing the database
+
+### Fixes
+
+- Resolve project slug from URL hash on page refresh
+- Prevent premature server exit with a 30-second shutdown delay
+- Reduce memory usage from event data retention
+- Suppress Radix DialogContent aria-describedby warning on all modals
+- Upgrade Vite to address security vulnerability
+
+### Other
+
+- Centralized configuration and extracted shared libraries (hooks, fs, docker env)
+- Reorganized tests and added CLI and MCP server test coverage
+- Updated documentation, release scripts, and developer tooling
+
+## v0.7.5 — Search polish, timeline fixes, and release tooling
+
+No breaking changes. This version is just cosmetic improvements.
+
+### Features
+
+- Improved search UI with input debouncing, highlighted active border, clear button, and whitespace-only filtering
+- Added cursor pointer to clickable elements in the sidebar and stream list
+- Display plugin version in the sidebar and redesigned the Settings > Projects view
+
+### Fixes
+
+- Fixed timeline dot positioning to align correctly with trace events
+- Fixed timeline animation so dots animate smoothly as a group instead of individually
+
+### Other
+
+- Added fresh install test harness with integration into the release workflow
+- Improved release script with dry-run flag, skip-build option, and Claude-generated changelogs
+- Updated contributor documentation and formatting configuration

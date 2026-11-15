@@ -1,0 +1,191 @@
+// app/server/src/storage/types.ts
+
+import type { Filter } from '../types'
+
+export class DuplicateEventSignatureError extends Error {
+  constructor(public readonly signatureHash: string) {
+    super(`Duplicate event signature: ${signatureHash}`)
+    this.name = 'DuplicateEventSignatureError'
+  }
+}
+
+export interface InsertEventParams {
+  agentId: string
+  sessionId: string
+  /** Raw hook event name from the envelope. */
+  hookName: string
+  timestamp: number
+  payload: Record<string, unknown>
+  /** Per-event cwd (lifted from envelope). Optional. */
+  cwd?: string | null
+  /** Envelope creation hints persisted for traceability. Optional. */
+  _meta?: Record<string, unknown> | null
+  /** Stable signature for dedup. When set, a UNIQUE constraint is enforced. */
+  signatureHash?: string | null
+}
+
+export interface InsertEventResult {
+  eventId: number
+}
+
+export interface EventFilters {
+  agentIds?: string[]
+  hookName?: string
+  search?: string
+  limit?: number
+  offset?: number
+}
+
+export interface StoredEvent {
+  id: number
+  agent_id: string
+  session_id: string
+  hook_name: string
+  timestamp: number
+  created_at: number
+  cwd: string | null
+  _meta: string | null // JSON string in DB
+  payload: string // JSON string in DB
+}
+
+export interface AgentPatch {
+  name?: string | null
+  description?: string | null
+  agent_type?: string | null
+}
+
+export interface EventStore {
+  createProject(slug: string, name: string): Promise<number>
+  getProjectById(id: number): Promise<any | null>
+  getProjectBySlug(slug: string): Promise<any | null>
+  updateProjectName(projectId: number, name: string): Promise<void>
+  isSlugAvailable(slug: string): Promise<boolean>
+  /**
+   * Find-or-create a project by slug. Uses INSERT ... ON CONFLICT(slug)
+   * DO NOTHING followed by SELECT, so concurrent inserts converge on
+   * the same row. Never auto-suffixes.
+   */
+  findOrCreateProjectBySlug(
+    slug: string,
+    name?: string,
+  ): Promise<{ id: number; slug: string; created: boolean }>
+  /**
+   * Look up a session that already has a project, matching by either
+   * `start_cwd` or `dirname(transcript_path)`. Used by project
+   * resolution when `flags.resolveProject` fires.
+   */
+  findSiblingSessionWithProject(input: {
+    startCwd: string | null
+    transcriptBasedir: string | null
+    excludeSessionId: string
+  }): Promise<{ projectId: number } | null>
+  deleteProject(
+    projectId: number,
+  ): Promise<{ sessionIds: string[]; sessions: number; agents: number; events: number }>
+  upsertSession(
+    id: string,
+    projectId: number | null,
+    slug: string | null,
+    metadata: Record<string, unknown> | null,
+    timestamp: number,
+    transcriptPath?: string | null,
+    startCwd?: string | null,
+  ): Promise<void>
+  upsertAgent(
+    id: string,
+    sessionId: string,
+    parentAgentId: string | null,
+    name: string | null,
+    description: string | null,
+    agentType?: string | null,
+    agentClass?: string | null,
+  ): Promise<void>
+  /** Layer 3 patch path. Only `name`, `description`, `agent_type` honored. */
+  patchAgent(id: string, patch: AgentPatch): Promise<any | null>
+  updateAgentType(id: string, agentType: string): Promise<void>
+  updateSessionStatus(id: string, status: string): Promise<void>
+  patchSessionMetadata(sessionId: string, patch: Record<string, unknown>): Promise<void>
+  updateSessionSlug(sessionId: string, slug: string): Promise<void>
+  updateSessionProject(sessionId: string, projectId: number): Promise<void>
+  updateAgentName(agentId: string, name: string): Promise<void>
+  /** Set `pending_notification_ts = timestamp` and bump count + last. */
+  startSessionNotification(sessionId: string, timestamp: number): Promise<void>
+  /** Clear pending notification state (count -> 0, ts -> NULL). */
+  clearSessionNotification(sessionId: string): Promise<void>
+  /** Stamp `sessions.stopped_at = timestamp`. */
+  stopSession(sessionId: string, timestamp: number): Promise<void>
+  /** Update `sessions.last_activity` to MAX(current, timestamp). */
+  touchSessionActivity(sessionId: string, timestamp: number): Promise<void>
+  insertEvent(params: InsertEventParams): Promise<InsertEventResult>
+  findEventBySignatureHash(hash: string): Promise<{ id: number } | null>
+  getProjects(): Promise<any[]>
+  getSessionsForProject(projectId: number): Promise<any[]>
+  getSessionById(sessionId: string): Promise<any | null>
+  getSessionTranscriptPath(sessionId: string): Promise<string | null>
+  getAgentById(agentId: string): Promise<any | null>
+  getSessionsWithPendingNotifications(sinceTs: number): Promise<any[]>
+  getAgentsForSession(sessionId: string): Promise<any[]>
+  getEventsForSession(sessionId: string, filters?: EventFilters): Promise<StoredEvent[]>
+  getEventsForAgent(agentId: string): Promise<StoredEvent[]>
+  getEventsSince(sessionId: string, sinceTimestamp: number): Promise<StoredEvent[]>
+  deleteSession(sessionId: string): Promise<{ events: number; agents: number }>
+  deleteSessions(
+    sessionIds: string[],
+  ): Promise<{ events: number; agents: number; sessions: number }>
+  clearAllData(): Promise<{ projects: number; sessions: number; agents: number; events: number }>
+  clearSessionEvents(sessionId: string): Promise<{ events: number; agents: number }>
+  getDbStats(): Promise<{ sessionCount: number; eventCount: number }>
+  vacuum(): Promise<void>
+  /** Recent sessions, newest activity first. When `since` (epoch ms) is
+   *  given, only sessions whose last activity is at or after it are returned
+   *  — used by the Constellation dashboard's activity-window filter. */
+  getRecentSessions(limit?: number, since?: number): Promise<any[]>
+  /** Sessions where project_id IS NULL — surfaced in the sidebar's
+   *  "Unassigned" bucket. Server doesn't auto-assign post-refactor
+   *  unless `flags.resolveProject` or `_meta.project.slug` is set, so
+   *  these are genuinely user-actionable. */
+  getUnassignedSessions(limit?: number): Promise<any[]>
+  healthCheck(): Promise<{ ok: boolean; error?: string }>
+  /**
+   * Scan all tables for rows with broken foreign keys and repair them.
+   * - Sessions with invalid project_id → project_id set to NULL
+   * - Agents with no referencing events → deleted
+   * - Events with invalid session_id or agent_id → deleted
+   *
+   * Returns a summary of what was repaired.
+   */
+  repairOrphans(): Promise<OrphanRepairResult>
+  // === Filters ===
+  listFilters(): Promise<Filter[]>
+  getFilterById(id: string): Promise<Filter | null>
+  createFilter(input: {
+    name: string
+    pillName: string
+    display: 'primary' | 'secondary'
+    combinator: 'and' | 'or'
+    patterns: { target: 'hook' | 'tool' | 'payload'; regex: string }[]
+  }): Promise<Filter>
+  updateFilter(
+    id: string,
+    patch: Partial<{
+      name: string
+      pillName: string
+      display: 'primary' | 'secondary'
+      combinator: 'and' | 'or'
+      patterns: { target: 'hook' | 'tool' | 'payload'; regex: string }[]
+      enabled: boolean
+    }>,
+  ): Promise<Filter>
+  deleteFilter(id: string): Promise<void>
+  duplicateFilter(id: string): Promise<Filter>
+  resetDefaultFilters(): Promise<Filter[]>
+  /** Idempotent. Inserts missing defaults; updates name/pill_name/display/combinator/patterns of existing rows; never touches enabled. */
+  seedDefaultFilters(): Promise<void>
+}
+
+export interface OrphanRepairResult {
+  sessionsReassigned: number
+  agentsDeleted: number
+  agentsReparented: number
+  eventsDeleted: number
+}

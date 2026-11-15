@@ -1,0 +1,140 @@
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
+import type { EventStore } from './storage/types'
+
+const stubStore = {
+  healthCheck: async () => ({ ok: true }),
+} as unknown as EventStore
+const noop = () => {}
+
+describe('dev mode redirect', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  test('redirects unmatched GET requests to dev client', async () => {
+    vi.doMock('./config', () => ({
+      config: {
+        clientDistPath: '',
+        isDev: true,
+        devClientPort: 5174,
+        transcriptStats: { enabled: false },
+      },
+    }))
+
+    const { createApp } = await import('./app')
+    const app = createApp(stubStore, noop, noop, noop)
+
+    const res = await app.request('/', { method: 'GET' })
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe('http://localhost:5174')
+  })
+
+  test('redirects arbitrary paths to dev client', async () => {
+    vi.doMock('./config', () => ({
+      config: {
+        clientDistPath: '',
+        isDev: true,
+        devClientPort: 5174,
+        transcriptStats: { enabled: false },
+      },
+    }))
+
+    const { createApp } = await import('./app')
+    const app = createApp(stubStore, noop, noop, noop)
+
+    const res = await app.request('/some/path', { method: 'GET' })
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe('http://localhost:5174')
+  })
+
+  test('does not redirect API routes', async () => {
+    vi.doMock('./config', () => ({
+      config: {
+        clientDistPath: '',
+        isDev: true,
+        devClientPort: 5174,
+        transcriptStats: { enabled: false },
+      },
+    }))
+
+    const { createApp } = await import('./app')
+    const app = createApp(stubStore, noop, noop, noop)
+
+    const res = await app.request('/api/health', { method: 'GET' })
+    expect(res.status).toBe(200)
+  })
+
+  test('does not redirect when runtime is not dev', async () => {
+    vi.doMock('./config', () => ({
+      config: {
+        clientDistPath: '',
+        isDev: false,
+        devClientPort: 5174,
+        transcriptStats: { enabled: false },
+      },
+    }))
+
+    const { createApp } = await import('./app')
+    const app = createApp(stubStore, noop, noop, noop)
+
+    const res = await app.request('/', { method: 'GET' })
+    expect(res.status).toBe(404)
+  })
+
+  test('uses configured devClientPort', async () => {
+    vi.doMock('./config', () => ({
+      config: {
+        clientDistPath: '',
+        isDev: true,
+        devClientPort: 9999,
+        transcriptStats: { enabled: false },
+      },
+    }))
+
+    const { createApp } = await import('./app')
+    const app = createApp(stubStore, noop, noop, noop)
+
+    const res = await app.request('/', { method: 'GET' })
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe('http://localhost:9999')
+  })
+})
+
+describe('CORS default policy (issue #22)', () => {
+  // Uses the real config (no doMock) so corsAllowedOrigins defaults to empty
+  // → loopback-reflect. resetModules keeps this isolated from the doMock'd
+  // config in the suite above.
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  test('reflects a loopback origin', async () => {
+    const { createApp } = await import('./app')
+    const app = createApp(stubStore, noop, noop, noop)
+
+    const res = await app.request('/api/health', {
+      method: 'GET',
+      headers: { Origin: 'http://localhost:5174' },
+    })
+    expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:5174')
+  })
+
+  test('does not allow a non-loopback origin', async () => {
+    const { createApp } = await import('./app')
+    const app = createApp(stubStore, noop, noop, noop)
+
+    const res = await app.request('/api/health', {
+      method: 'GET',
+      headers: { Origin: 'https://evil.com' },
+    })
+    expect(res.headers.get('access-control-allow-origin')).toBeNull()
+  })
+})
