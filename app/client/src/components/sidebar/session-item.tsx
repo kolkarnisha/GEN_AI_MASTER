@@ -1,0 +1,305 @@
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { cn } from '@/lib/utils'
+import { Pin, SquarePen } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { AgentClassIcon, agentClassDisplayName } from '@/components/shared/agent-class-icon'
+import {
+  NotificationIndicator,
+  dismissNotification,
+  useSessionHasNotification,
+  useAnnounceVisibleBell,
+} from './notification-indicator'
+import { useSessionPulseActive } from '@/hooks/use-pulse-active'
+import type { Session } from '@/types'
+
+interface SessionItemProps {
+  session: Session
+  isSelected: boolean
+  /** Soft highlight + scroll-into-view for a previewed (drill-in) session,
+   *  without the solid "selected" treatment. */
+  isPreview?: boolean
+  isPinned: boolean
+  onSelect: () => void
+  onTogglePin: () => void
+  onRename: (id: string, name: string) => Promise<void>
+  /** Click handler for the pencil/edit icon. Defaults to inline rename. */
+  onEdit?: () => void
+  eventCountOverride?: number
+  relativeTime?: string
+  cwd?: string | null
+  /** Show the cwd line below the session name. Defaults to true. */
+  showCwd?: boolean
+}
+
+function shortenCwd(cwd: string): string {
+  return cwd.replace(/^\/(?:Users|home)\/[^/]+/, '~')
+}
+
+function formatRelativeTime(ts: number): string {
+  const diff = Date.now() - ts
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+export function SessionItem({
+  session,
+  isSelected,
+  isPreview = false,
+  isPinned,
+  onSelect,
+  onTogglePin,
+  onRename,
+  onEdit,
+  eventCountOverride,
+  relativeTime,
+  cwd,
+  showCwd = true,
+}: SessionItemProps) {
+  const [isEditing, setIsEditing] = useState(false)
+  const [editValue, setEditValue] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+  const rowRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (isEditing && inputRef.current) {
+      inputRef.current.focus()
+      inputRef.current.select()
+    }
+  }, [isEditing])
+
+  // Bring a previewed session into view (drill-in focus on the home view).
+  useEffect(() => {
+    if (isPreview) rowRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [isPreview])
+
+  const label = session.slug || session.id.slice(0, 8)
+
+  const startEditing = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+      setIsEditing(true)
+      setEditValue(label)
+    },
+    [label],
+  )
+
+  const cancelEditing = useCallback(() => {
+    setIsEditing(false)
+    setEditValue('')
+  }, [])
+
+  const saveSlug = useCallback(async () => {
+    const trimmed = editValue.trim()
+    if (trimmed && trimmed !== label) {
+      await onRename(session.id, trimmed)
+    }
+    setIsEditing(false)
+    setEditValue('')
+  }, [editValue, label, session.id, onRename])
+
+  // Status is derived from stoppedAt — the server emits a `status`
+  // string for back-compat but `stoppedAt` is the canonical signal and
+  // also the only one persisted on the row. Reading directly avoids a
+  // round-trip through a stringly-typed field.
+  const isActive = !session.stoppedAt
+  const statusLabel = isActive ? 'Active' : 'Ended'
+  // `eventCountOverride` is supplied by the parent — live count for
+  // the active session (from streaming events) or the server-provided
+  // count for the rest. Undefined for sessions whose payload predates
+  // the count.
+  const eventCount = eventCountOverride
+  const lastActivityTs = session.lastActivity ?? session.startedAt
+  const needsAttention = useSessionHasNotification(session.id)
+  // True for ACTIVITY_CONFIG.pulseDurationMs after the server
+  // broadcasts an activity ping for this session. Suppressed when the
+  // bell is showing — the bell animation already signals activity,
+  // and stacking two pulses is noisy.
+  const pulseActive = useSessionPulseActive(session.id) && !(needsAttention && !isEditing)
+  // Register this session's bell as visible so the parent project's
+  // folder indicator can suppress itself (no double-signaling).
+  useAnnounceVisibleBell(session.id, needsAttention && !isEditing)
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div
+          ref={rowRef}
+          role="button"
+          tabIndex={isEditing ? -1 : 0}
+          aria-current={isSelected ? 'true' : undefined}
+          data-sidebar-item=""
+          className={cn(
+            'group rounded-md px-2 py-1 transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            isSelected
+              ? 'bg-accent text-accent-foreground'
+              : isPreview
+                ? 'bg-accent/40 text-foreground ring-1 ring-ring/50'
+                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
+          )}
+          onClick={() => !isEditing && onSelect()}
+          onKeyDown={(e) => {
+            if (isEditing) return
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              onSelect()
+            }
+          }}
+        >
+          <div className="flex items-center gap-1.5 text-xs">
+            {needsAttention && !isEditing ? (
+              // Swap: bell replaces the status dot / pin affordance until
+              // the user acknowledges it. Clicking dismisses and the
+              // normal dot/pin returns.
+              <NotificationIndicator
+                compact
+                className="h-3 w-3 shrink-0"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  dismissNotification(session.id)
+                }}
+              />
+            ) : (
+              <span
+                className="relative h-3 w-3 shrink-0 flex items-center justify-center"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onTogglePin()
+                }}
+              >
+                {/* Activity pulse — faint green ping behind the dot /
+                    pin. Mirrors the bell's ping layer style. Runs
+                    continuously for ACTIVITY_CONFIG.pulseDurationMs
+                    after each ping, then disappears. */}
+                {pulseActive && (
+                  <span
+                    aria-hidden
+                    className="absolute h-2.5 w-2.5 rounded-full bg-green-400/50 dark:bg-green-300/40 animate-ping"
+                  />
+                )}
+                <span
+                  className={cn(
+                    'h-2 w-2 rounded-full relative',
+                    isPinned ? 'hidden' : 'group-hover:hidden',
+                    isActive
+                      ? 'bg-green-500'
+                      : 'bg-muted-foreground/60 dark:bg-muted-foreground/40',
+                  )}
+                />
+                <Pin
+                  fill={isPinned ? 'currentColor' : 'none'}
+                  className={cn(
+                    'h-3 w-3 absolute inset-0 cursor-pointer transition-opacity',
+                    isPinned
+                      ? isActive
+                        ? 'opacity-80 text-green-500 hover:fill-none'
+                        : 'opacity-60 text-primary hover:fill-none'
+                      : 'opacity-0 group-hover:opacity-100',
+                    !isPinned &&
+                      (isActive
+                        ? 'text-green-500/60 hover:text-green-500'
+                        : 'text-muted-foreground/50 hover:text-muted-foreground'),
+                  )}
+                />
+              </span>
+            )}
+            {isEditing ? (
+              <input
+                ref={inputRef}
+                className="truncate bg-transparent border border-border rounded px-0.5 text-xs outline-none w-full min-w-0"
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    saveSlug()
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault()
+                    cancelEditing()
+                  }
+                }}
+                onBlur={() => saveSlug()}
+                onClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <span
+                className="truncate"
+                onDoubleClick={(e) => {
+                  e.stopPropagation()
+                  startEditing(e)
+                }}
+              >
+                {label}
+              </span>
+            )}
+            {!isEditing && relativeTime && (
+              <span className="text-[10px] text-muted-foreground/60 dark:text-muted-foreground/40 ml-auto shrink-0 hidden @[275px]:inline group-hover:!hidden">
+                {relativeTime}
+              </span>
+            )}
+            {!isEditing && eventCount != null && (
+              <Badge
+                variant="outline"
+                className={cn(
+                  'text-[9px] h-3.5 px-1 shrink-0 hidden @[200px]:inline-flex group-hover:!hidden',
+                  'text-muted-foreground/60',
+                  relativeTime ? 'ml-auto @[275px]:ml-0' : 'ml-auto',
+                )}
+              >
+                {eventCount}
+              </Badge>
+            )}
+            {!isEditing && (
+              <SquarePen
+                data-testid={`edit-session-${session.id}`}
+                className="h-3 w-3 shrink-0 ml-auto hidden group-hover:block text-muted-foreground/50 hover:text-muted-foreground transition-opacity cursor-pointer"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (onEdit) {
+                    onEdit()
+                  } else {
+                    startEditing(e)
+                  }
+                }}
+              />
+            )}
+          </div>
+          {cwd && showCwd && (
+            <div
+              className="pl-[18px] pb-0.5 text-[10px] text-muted-foreground/30 dark:text-muted-foreground/20 group-hover:text-muted-foreground/70 dark:group-hover:text-muted-foreground/50 transition-colors truncate"
+              dir="rtl"
+            >
+              <span dir="ltr">{shortenCwd(cwd)}</span>
+            </div>
+          )}
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="right" className="text-xs space-y-0.5 max-w-xs">
+        <div className="truncate font-medium">{label}</div>
+        {cwd && <div className="truncate">{shortenCwd(cwd)}</div>}
+        {session.agentClasses.length > 0 && (
+          <div className="flex items-center gap-1 flex-wrap opacity-80">
+            <span>Agents:</span>
+            {session.agentClasses.map((cls, i) => (
+              <span key={cls} className="flex items-center gap-0.5">
+                <AgentClassIcon agentClass={cls} />
+                <span>
+                  {agentClassDisplayName(cls)}
+                  {i < session.agentClasses.length - 1 ? ',' : ''}
+                </span>
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="opacity-80">
+          {statusLabel}: {formatRelativeTime(lastActivityTs)} - Created:{' '}
+          {formatRelativeTime(session.startedAt)}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}

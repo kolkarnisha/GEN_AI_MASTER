@@ -1,0 +1,326 @@
+#!/bin/bash
+# Fresh install test harness — entrypoint (runs inside test container)
+# Starts inner dockerd, loads pre-built server image, runs claude against
+# the plugin, runs verification checks, and prints a full diagnostic dump.
+
+set -uo pipefail
+
+echo "=== Fresh install test harness — entrypoint starting ==="
+echo "Container: $(hostname)"
+echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+echo ""
+
+# --- Start inner dockerd -----------------------------------------------
+echo "=== Starting inner dockerd ==="
+dockerd-entrypoint.sh >/var/log/dockerd.log 2>&1 &
+DOCKERD_PID=$!
+
+echo "Waiting for dockerd (pid $DOCKERD_PID) to become responsive..."
+for i in $(seq 1 60); do
+  if docker info >/dev/null 2>&1; then
+    echo "dockerd is up after ${i}s"
+    break
+  fi
+  sleep 1
+done
+
+if ! docker info >/dev/null 2>&1; then
+  echo "FATAL: dockerd did not become responsive within 60 seconds"
+  echo ""
+  echo "--- /var/log/dockerd.log (tail) ---"
+  tail -n 50 /var/log/dockerd.log || true
+  exit 1
+fi
+echo ""
+
+# --- Load pre-built server image from tarball --------------------------
+echo "=== Loading server image from tarball ==="
+if [ ! -f /server-image.tar ]; then
+  echo "FATAL: /server-image.tar not found (the driver script must mount it)"
+  exit 1
+fi
+
+docker load -i /server-image.tar
+echo ""
+
+if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q '^agents-observe:local$'; then
+  echo "FATAL: agents-observe:local not present in inner dockerd after load"
+  docker images
+  exit 1
+fi
+echo "Server image loaded successfully"
+echo ""
+
+# --- Configure plugin to use loaded image ------------------------------
+export AGENTS_OBSERVE_DOCKER_IMAGE=agents-observe:local
+export AGENTS_OBSERVE_TEST_SKIP_PULL=1
+echo "AGENTS_OBSERVE_DOCKER_IMAGE=$AGENTS_OBSERVE_DOCKER_IMAGE"
+echo "AGENTS_OBSERVE_TEST_SKIP_PULL=$AGENTS_OBSERVE_TEST_SKIP_PULL"
+echo ""
+
+# --- Set CLAUDE_PLUGIN_ROOT ---------------------------------------------
+# --plugin-dir loads the plugin's hooks.json AND its .mcp.json. The hook
+# commands reference ${CLAUDE_PLUGIN_ROOT} (bash expands it at exec
+# time), so the var must be in the environment when claude launches the
+# hook. Claude sets this automatically for installed plugins; for
+# --plugin-dir we set it ourselves so the commands resolve correctly.
+export CLAUDE_PLUGIN_ROOT=/plugin
+echo "CLAUDE_PLUGIN_ROOT=$CLAUDE_PLUGIN_ROOT"
+echo ""
+
+# --- Run claude as non-root user --------------------------------------
+# Claude CLI refuses --permission-mode bypassPermissions as root.
+# Run as testuser, passing through env vars it needs.
+echo "=== Running claude -p ... (as testuser) ==="
+CLAUDE_STDOUT=/tmp/claude.stdout
+CLAUDE_STDERR=/tmp/claude.stderr
+CLAUDE_DEBUG_LOG=/tmp/claude-debug.log
+set +e
+su -s /bin/bash testuser -c "
+  export CLAUDE_CODE_OAUTH_TOKEN='$CLAUDE_CODE_OAUTH_TOKEN'
+  export AGENTS_OBSERVE_DOCKER_IMAGE='$AGENTS_OBSERVE_DOCKER_IMAGE'
+  export AGENTS_OBSERVE_TEST_SKIP_PULL='$AGENTS_OBSERVE_TEST_SKIP_PULL'
+  export AGENTS_OBSERVE_LOG_LEVEL='${AGENTS_OBSERVE_LOG_LEVEL:-trace}'
+  export AGENTS_OBSERVE_PROJECT_SLUG='claude-test'
+  # The plugin now publishes its server container on 127.0.0.1 by default
+  # (issue #22). Inside this dind container that binds the dind loopback, so
+  # the host port-forward into the dind eth0 (UI_PORT in the driver script)
+  # cannot reach it: the dashboard is unreachable from the host for the
+  # manual UI check, though curl to 127.0.0.1:4981 still works from inside
+  # the dind. Publish on all interfaces so the forward chain works. Safe:
+  # this dind container is the isolation boundary, not a shared host.
+  export AGENTS_OBSERVE_BIND=0.0.0.0
+  export CLAUDE_PLUGIN_ROOT='$CLAUDE_PLUGIN_ROOT'
+  claude \
+    --plugin-dir /plugin \
+    --permission-mode bypassPermissions \
+    --debug hooks \
+    --debug-file '$CLAUDE_DEBUG_LOG' \
+    -p '/observe status' \
+    >'$CLAUDE_STDOUT' 2>'$CLAUDE_STDERR'
+"
+CLAUDE_EXIT=$?
+# Do NOT restore set -e here — the rest of the script (verification +
+# diagnostic dump) must tolerate individual command failures.
+
+echo "claude exit code: $CLAUDE_EXIT"
+echo ""
+
+# --- Verification phase -------------------------------------------------
+echo "=== Running verification checks ==="
+CHECK_1_RESULT="FAIL"; CHECK_1_DETAIL=""
+CHECK_2_RESULT="FAIL"; CHECK_2_DETAIL=""
+CHECK_3_RESULT="FAIL"; CHECK_3_DETAIL=""
+CHECK_4_MCP_COUNT=0
+CHECK_4_CLI_COUNT=0
+
+# Check 1: inner agents-observe container exists and is running
+CONTAINER_STATUS="$(docker ps -a --filter name=agents-observe --format '{{.Status}}' | head -1)"
+if [ -n "$CONTAINER_STATUS" ] && echo "$CONTAINER_STATUS" | grep -qi '^up'; then
+  CHECK_1_RESULT="PASS"
+  CHECK_1_DETAIL="$CONTAINER_STATUS"
+else
+  CHECK_1_DETAIL="status='$CONTAINER_STATUS' (expected 'Up ...')"
+fi
+
+# Check 2: server health endpoint returns 200 with ok:true
+HEALTH_BODY="$(curl -sf http://127.0.0.1:4981/api/health 2>/tmp/curl-health.err || true)"
+if [ -n "$HEALTH_BODY" ] && echo "$HEALTH_BODY" | jq -e '.ok == true' >/dev/null 2>&1; then
+  CHECK_2_RESULT="PASS"
+  CHECK_2_DETAIL="$(echo "$HEALTH_BODY" | jq -c '{ok, version, runtime}')"
+else
+  CHECK_2_DETAIL="body='$HEALTH_BODY' curl-err='$(cat /tmp/curl-health.err 2>/dev/null || true)'"
+fi
+
+# Check 3: at least one session with at least one event captured
+SESSIONS_BODY="$(curl -sf http://127.0.0.1:4981/api/sessions/recent 2>/tmp/curl-sessions.err || true)"
+if [ -n "$SESSIONS_BODY" ]; then
+  SESSION_COUNT="$(echo "$SESSIONS_BODY" | jq 'if type == "array" then length elif .sessions then (.sessions | length) else 0 end' 2>/dev/null || echo 0)"
+  if [ "${SESSION_COUNT:-0}" -gt 0 ]; then
+    CHECK_3_RESULT="PASS"
+    CHECK_3_DETAIL="session_count=$SESSION_COUNT"
+  else
+    CHECK_3_DETAIL="session_count=0 (expected >=1) body='$(echo "$SESSIONS_BODY" | head -c 200)'"
+  fi
+else
+  CHECK_3_DETAIL="empty response curl-err='$(cat /tmp/curl-sessions.err 2>/dev/null || true)'"
+fi
+
+# Check 4 (soft): grep ERROR lines in mcp.log and cli.log
+# Scope to /plugin/data — the only place the current run writes logs.
+# A blanket `find /` also picks up stale logs baked into the image from
+# host-side worktrees, which pollutes counts and the diagnostic dump.
+MCP_LOG_FILES="$(find /plugin/data -type f -name 'mcp.log' 2>/dev/null)"
+CLI_LOG_FILES="$(find /plugin/data -type f -name 'cli.log' 2>/dev/null)"
+if [ -n "$MCP_LOG_FILES" ]; then
+  CHECK_4_MCP_COUNT="$(grep -c 'ERROR' $MCP_LOG_FILES 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}')"
+fi
+if [ -n "$CLI_LOG_FILES" ]; then
+  CHECK_4_CLI_COUNT="$(grep -c 'ERROR' $CLI_LOG_FILES 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}')"
+fi
+
+# --- Unconditional diagnostic dump -------------------------------------
+echo ""
+echo "=============================================="
+echo "=== DIAGNOSTIC BUNDLE (always printed)     ==="
+echo "=============================================="
+echo ""
+echo "=== claude version ==="
+claude --version 2>&1 || echo "(claude --version failed)"
+echo ""
+
+echo "=== claude invocation ==="
+echo "exit code: $CLAUDE_EXIT"
+echo ""
+echo "--- claude stdout ---"
+cat "$CLAUDE_STDOUT" 2>/dev/null || echo "(file not found)"
+echo ""
+echo "--- claude stderr ---"
+cat "$CLAUDE_STDERR" 2>/dev/null || echo "(file not found)"
+echo ""
+echo "--- claude debug log (plugin + hook loading) ---"
+# Filter to lines that matter for plugin/hook diagnosis. If the full log
+# is needed, docker exec into the kept-alive container and cat
+# $CLAUDE_DEBUG_LOG directly.
+if [ -f "$CLAUDE_DEBUG_LOG" ]; then
+  grep -E '\[ERROR\]|\[WARN\]|Registered .* hooks|Loaded .* plugin|Loaded hooks|Hooks: Found|Invalid key|Invalid option|SyntaxError|Hook [A-Z]' "$CLAUDE_DEBUG_LOG" 2>/dev/null | head -60 || true
+  DBG_SIZE="$(wc -l < "$CLAUDE_DEBUG_LOG" 2>/dev/null || echo 0)"
+  echo "(filtered view; full log is $DBG_SIZE lines at $CLAUDE_DEBUG_LOG inside the container)"
+else
+  echo "(no debug log at $CLAUDE_DEBUG_LOG)"
+fi
+echo ""
+
+echo "=== docker state (inside test container) ==="
+echo "--- docker ps -a ---"
+docker ps -a
+echo ""
+echo "--- docker images ---"
+docker images
+echo ""
+
+echo "=== docker logs agents-observe (inner server container) ==="
+if docker ps -a --format '{{.Names}}' | grep -q '^agents-observe$'; then
+  docker logs agents-observe 2>&1 || true
+else
+  echo "(agents-observe container not present)"
+fi
+echo ""
+
+echo "=== mcp.log ==="
+if [ -n "$MCP_LOG_FILES" ]; then
+  for f in $MCP_LOG_FILES; do
+    echo "--- $f ---"
+    cat "$f" || true
+  done
+else
+  echo "(no mcp.log files found)"
+fi
+echo ""
+
+echo "=== cli.log ==="
+if [ -n "$CLI_LOG_FILES" ]; then
+  for f in $CLI_LOG_FILES; do
+    echo "--- $f ---"
+    cat "$f" || true
+  done
+else
+  echo "(no cli.log files found)"
+fi
+echo ""
+
+# claude writes its own internal state (transcripts, plugin cache, and
+# sometimes debug logs) under ~/.claude. Dump any log files it left plus
+# a listing so plugin/hook loading errors aren't silent.
+echo "=== claude internal state (~/.claude) ==="
+for home in /home/testuser /root; do
+  if [ -d "$home/.claude" ]; then
+    echo "--- $home/.claude (top-level listing) ---"
+    find "$home/.claude" -maxdepth 3 -type f 2>/dev/null | head -40 || true
+    echo ""
+    CLAUDE_LOGS="$(find "$home/.claude" -type f -name '*.log' 2>/dev/null)"
+    if [ -n "$CLAUDE_LOGS" ]; then
+      for f in $CLAUDE_LOGS; do
+        echo "--- $f ---"
+        head -n 200 "$f" 2>/dev/null || true
+        echo ""
+      done
+    else
+      echo "(no *.log files under $home/.claude)"
+    fi
+  fi
+done
+echo ""
+
+echo "=== verification results ==="
+echo "1. Inner container exists: $CHECK_1_RESULT — $CHECK_1_DETAIL"
+echo "2. Server health:          $CHECK_2_RESULT — $CHECK_2_DETAIL"
+echo "3. Events captured:        $CHECK_3_RESULT — $CHECK_3_DETAIL"
+echo "4. mcp.log ERROR lines:    $CHECK_4_MCP_COUNT"
+echo "4. cli.log ERROR lines:    $CHECK_4_CLI_COUNT"
+
+# Check 5 (soft): UI HTML loads and references valid assets
+CHECK_5_RESULT="SKIP"
+CHECK_5_DETAIL=""
+UI_HTML="$(curl -sf http://127.0.0.1:4981/ 2>/dev/null || true)"
+if [ -n "$UI_HTML" ]; then
+  if echo "$UI_HTML" | grep -q '<div id="root">' && echo "$UI_HTML" | grep -q '<script'; then
+    # Verify JS assets are reachable
+    ASSET_URLS="$(echo "$UI_HTML" | grep -oE '(src|href)="/assets/[^"]+' | sed 's/^[^"]*"//' || true)"
+    ASSETS_OK=true
+    for asset in $ASSET_URLS; do
+      if ! curl -sf "http://127.0.0.1:4981${asset}" -o /dev/null 2>/dev/null; then
+        ASSETS_OK=false
+        CHECK_5_DETAIL="missing asset: $asset"
+        break
+      fi
+    done
+    if $ASSETS_OK; then
+      CHECK_5_RESULT="PASS"
+      CHECK_5_DETAIL="HTML + $(echo "$ASSET_URLS" | wc -w | tr -d ' ') assets OK"
+    else
+      CHECK_5_RESULT="FAIL"
+    fi
+  else
+    CHECK_5_RESULT="FAIL"
+    CHECK_5_DETAIL="HTML missing root div or script tag"
+  fi
+else
+  CHECK_5_DETAIL="curl to / returned empty"
+fi
+echo "5. UI assets reachable:    $CHECK_5_RESULT — $CHECK_5_DETAIL"
+echo ""
+
+# --- Final status ------------------------------------------------------
+if [ "$CHECK_1_RESULT" = "PASS" ] && [ "$CHECK_2_RESULT" = "PASS" ] && [ "$CHECK_3_RESULT" = "PASS" ]; then
+  FINAL_STATUS="PASS"
+else
+  FINAL_STATUS="FAIL"
+fi
+
+echo "=== final status: $FINAL_STATUS ==="
+echo "[CHECKS_DONE]"
+
+# Keep alive if requested — works on PASS (for manual UI verification)
+# AND on FAIL (so the operator can `docker exec -it` in and poke around,
+# look at ~/.claude, run `claude --version`, etc.)
+if [ "${AGENTS_OBSERVE_TEST_KEEP_ALIVE:-}" = "1" ]; then
+  if [ "$FINAL_STATUS" = "PASS" ]; then
+    echo "Container staying alive for manual UI check. Kill to exit."
+  else
+    echo "Test FAILED — container staying alive for investigation."
+    echo "  docker exec -it \$(hostname) bash"
+  fi
+  echo ""
+  if docker ps -a --format '{{.Names}}' | grep -q '^agents-observe$'; then
+    echo "=== Following inner server logs ==="
+    docker logs -f agents-observe 2>&1 &
+  fi
+  sleep infinity
+fi
+
+if [ "$FINAL_STATUS" = "PASS" ]; then
+  exit 0
+else
+  exit 1
+fi

@@ -1,0 +1,18 @@
+import { defineConfig } from 'vitest/config'
+import path from 'path'
+
+export default defineConfig({
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    // polyfill-storage must run first: it installs localStorage before
+    // setup.ts's import chain (and any store module) is evaluated.
+    setupFiles: ['./src/test/polyfill-storage.ts', './src/test/setup.ts'],
+    css: false,
+  },
+})

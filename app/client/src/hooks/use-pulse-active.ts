@@ -1,0 +1,75 @@
+import { useEffect, useRef, useState } from 'react'
+import { useUIStore } from '@/stores/ui-store'
+
+/**
+ * Returns true for the user-configured duration after the given session last
+ * received an activity ping from the server, then flips back to false.
+ *
+ * The pulse counter lives in ui-store and is incremented by the WS handler
+ * on every `{ type: 'activity' }` message. We read it here, track changes
+ * with a ref, and schedule a timeout to reset `active` back to false.
+ */
+export function useSessionPulseActive(sessionId: string): boolean {
+  const pulseCount = useUIStore((s) => s.sessionPulses[sessionId] ?? 0)
+  return usePulseTimer(pulseCount)
+}
+
+/**
+ * Project-scoped variant. Pulses whenever any session in the project
+ * pulses. Reads from the dedicated `projectPulses` counter that the WS
+ * handler updates alongside `sessionPulses` — no need to look up the
+ * project's session list.
+ */
+export function useProjectPulseActive(projectId: number | null | undefined): boolean {
+  const pulseCount = useUIStore((s) => (projectId != null ? (s.projectPulses[projectId] ?? 0) : 0))
+  return usePulseTimer(pulseCount)
+}
+
+/**
+ * Variant that aggregates a set of session pulse counters into a single
+ * value, so any child pulse re-triggers the timer. Retained for callers
+ * that already have the explicit session-id list in hand; new code
+ * should prefer `useProjectPulseActive`.
+ */
+export function useAggregatePulseActive(sessionIds: string[]): boolean {
+  const sum = useUIStore((s) => {
+    let total = 0
+    for (const id of sessionIds) total += s.sessionPulses[id] ?? 0
+    return total
+  })
+  return usePulseTimer(sum)
+}
+
+function usePulseTimer(counter: number): boolean {
+  const enabled = useUIStore((s) => s.activeIndicatorEnabled)
+  const durationMs = useUIStore((s) => s.activeIndicatorSeconds) * 1000
+  const prevRef = useRef(counter)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [active, setActive] = useState(false)
+
+  useEffect(() => {
+    // Skip the first render when counter is already > 0 — that means
+    // the session already pulsed before this component mounted, and we
+    // don't want a spurious pulse on mount. The counter is monotonic,
+    // so on subsequent renders any change means a real new ping.
+    if (counter === prevRef.current) return
+    prevRef.current = counter
+    // Indicator disabled in settings — never light up.
+    if (!enabled) return
+    setActive(true)
+    if (timerRef.current) clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(() => {
+      setActive(false)
+      timerRef.current = null
+    }, durationMs)
+  }, [counter, enabled, durationMs])
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current)
+    }
+  }, [])
+
+  // When disabled, force off immediately even if a pulse is mid-flight.
+  return enabled ? active : false
+}

@@ -1,0 +1,308 @@
+// Claude Code agent class — summary generation and utility helpers.
+
+import type { RawEvent } from '../types'
+
+/** Extract the binary/command name from a bash command string. */
+// Valid binary name: alphanumeric, hyphens, dots, underscores — no shell special chars
+const VALID_BINARY_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
+
+export function extractBashBinary(cmd: string): string | null {
+  const first = cmd.split('\n')[0].trim()
+  const tokens = first.split(/\s+/)
+  let skipNext = false
+  for (const token of tokens) {
+    if (skipNext) {
+      skipNext = false
+      continue
+    }
+    // Skip env vars (FOO=bar), shell operators, subshell markers
+    if (token.includes('=') || token === '&&' || token === ';' || token === '||') continue
+    if (token.startsWith('$(') || token.startsWith('`')) continue
+    if (token === 'cd') {
+      skipNext = true
+      continue
+    }
+    // Skip shell keywords that aren't binaries
+    if (
+      token === 'for' ||
+      token === 'do' ||
+      token === 'done' ||
+      token === 'if' ||
+      token === 'then' ||
+      token === 'else' ||
+      token === 'fi' ||
+      token === 'while' ||
+      token === 'case' ||
+      token === 'esac'
+    )
+      continue
+    const bin = token.replace(/^.*\//, '')
+    // Validate: must look like a real binary name
+    if (bin && VALID_BINARY_RE.test(bin)) return bin
+  }
+  return null
+}
+
+/** Strip cwd prefix to show relative paths. */
+export function relativePath(fp: string | undefined, cwd: string | undefined): string {
+  if (!fp) return ''
+  if (cwd && fp.startsWith(cwd)) {
+    const rel = fp.slice(cwd.length)
+    return rel.startsWith('/') ? rel.slice(1) : rel
+  }
+  return fp
+}
+
+/** Collapse newlines/whitespace into a single line, strip markdown. */
+export function oneLine(s: string): string {
+  return s
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^[-*] /gm, '')
+    .replace(/\s*\n\s*/g, ' ')
+    .trim()
+}
+
+/** Generate one-line summary text from a raw event. Takes derived
+ *  toolName as an argument since it's per-agent-class. The hookName
+ *  comes from the wire event directly (claude-code's deriveSubtype was
+ *  identity, so subtype === hookName always). */
+export function getEventSummary(
+  event: RawEvent,
+  hookName: string | null,
+  toolName: string | null,
+): string {
+  const p = event.payload as Record<string, any>
+  const cwd = (p.cwd as string | undefined) ?? undefined
+
+  switch (hookName) {
+    case 'UserPromptSubmit':
+      return oneLine(p.prompt || p.message?.content || '')
+    case 'UserPromptExpansion': {
+      const name = p.command_name as string | undefined
+      const args = p.command_args as string | undefined
+      if (name) return args ? `/${name} ${oneLine(args)}` : `/${name}`
+      return oneLine(p.prompt || '')
+    }
+    case 'Setup': {
+      const trigger = typeof p.trigger === 'string' ? p.trigger : null
+      return trigger ? `Setup (${trigger})` : 'Setup'
+    }
+    case 'SessionStart':
+      return p.source ? `Session ${p.source}` : 'New session'
+    case 'SessionEnd':
+      return 'Session ended'
+    case 'Stop': {
+      const lastMsg = p.last_assistant_message as string | undefined
+      return lastMsg ? `Final: "${oneLine(lastMsg)}"` : 'Session stopped'
+    }
+    case 'StopFailure': {
+      const msg = p.last_assistant_message as string | undefined
+      return msg ? `Turn failed: ${oneLine(msg)}` : 'Turn failed'
+    }
+    case 'SubagentStart':
+      return p.agent_name || p.description || 'Subagent started'
+    case 'SubagentStop':
+      return p.agent_name || 'Subagent stopped'
+    case 'Notification':
+      return oneLine(p.message || p.title || '')
+    case 'PreToolUse':
+    case 'PostToolUse':
+      return getToolSummary(toolName, p.tool_input, cwd)
+    case 'PostToolUseFailure':
+      return oneLine(p.error || getToolSummary(toolName, p.tool_input, cwd) || 'Tool failed')
+    case 'PostToolBatch': {
+      const uses = Array.isArray(p.tool_uses) ? (p.tool_uses as Array<Record<string, any>>) : []
+      if (uses.length === 0) return 'Tool batch'
+      const names = uses.map((u) => u?.tool_name).filter((n): n is string => typeof n === 'string')
+      const failed = uses.filter((u) => u?.status === 'failure').length
+      const head =
+        names.length <= 3
+          ? names.join(', ')
+          : `${names.slice(0, 3).join(', ')} +${names.length - 3}`
+      return failed > 0 ? `${head} (${failed} failed)` : head
+    }
+    case 'PermissionRequest': {
+      const tool = p.tool_name as string | undefined
+      const desc = p.tool_input?.description as string | undefined
+      if (tool && desc) return `${tool}: ${oneLine(desc)}`
+      if (tool) return tool
+      return 'Permission requested'
+    }
+    case 'TaskCreated':
+      return oneLine(p.task_subject || p.description || p.task_description || '')
+    case 'TaskCompleted':
+      return oneLine(p.task_subject || p.description || p.task_description || 'Task done')
+    case 'TeammateIdle':
+      return p.teammate_name || 'Teammate idle'
+    case 'InstructionsLoaded':
+      return p.file_path ? relativePath(p.file_path, cwd) : 'Instructions loaded'
+    case 'ConfigChange':
+      return p.file_path ? relativePath(p.file_path, cwd) : 'Config changed'
+    case 'CwdChanged':
+      return p.new_cwd || p.cwd || 'Directory changed'
+    case 'FileChanged':
+      return p.file_path ? relativePath(p.file_path, cwd) : 'File changed'
+    case 'PreCompact':
+      return 'Compacting context...'
+    case 'PostCompact':
+      return 'Context compacted'
+    case 'Elicitation':
+      return oneLine(p.message || p.question || 'MCP input requested')
+    case 'ElicitationResult':
+      return oneLine(p.response || p.result || 'User responded')
+    case 'WorktreeCreate':
+      return p.branch || p.path || 'Worktree created'
+    case 'WorktreeRemove':
+      return p.branch || p.path || 'Worktree removed'
+    default:
+      return ''
+  }
+}
+
+/** Max length for a StructuredOutput row summary. The payload can be huge,
+ *  and the summary string is duplicated into `event.summary` and (lowercased)
+ *  `event.searchText`, so cap it. The detail view shows the full value. */
+const STRUCTURED_OUTPUT_SUMMARY_MAX = 200
+
+/** A string is usable as a summary only when it has real content — single
+ *  characters like "x"/"s"/"r" (common degenerate StructuredOutput values)
+ *  don't count and fall through to the next candidate. */
+function usableSummary(s: unknown): s is string {
+  return typeof s === 'string' && s.trim().length >= 3
+}
+
+/** One-line summary for a StructuredOutput payload. The tool_input *is*
+ *  the structured object (schema-defined, arbitrary shape), so prefer a
+ *  conventional `summary` field, then an `<id>: <refinedFix>` pair (review/
+ *  fix workflows), then any string scalar, then a per-field breakdown.
+ *  Truncated to keep the duplicated copies small. */
+function structuredOutputSummary(toolInput: Record<string, any>): string {
+  return truncate(rawStructuredOutputSummary(toolInput), STRUCTURED_OUTPUT_SUMMARY_MAX)
+}
+
+function rawStructuredOutputSummary(toolInput: Record<string, any>): string {
+  if (usableSummary(toolInput.summary)) return oneLine(toolInput.summary)
+  // No usable `summary`: review/fix workflows emit `{ id, refinedFix, ... }`,
+  // so surface the fix keyed by its id rather than just the bare id.
+  if (usableSummary(toolInput.refinedFix)) {
+    const id =
+      typeof toolInput.id === 'string' && toolInput.id.trim() ? `${toolInput.id.trim()}: ` : ''
+    return oneLine(`${id}${toolInput.refinedFix}`)
+  }
+  for (const value of Object.values(toolInput)) {
+    if (usableSummary(value)) return oneLine(value)
+  }
+  // No usable scalar: describe each field by name, with array lengths and
+  // nested-object key counts (e.g. `‹findings: 8›`). Far more useful than a
+  // bare `‹N fields›`. Wrapped in guillemets so `isWeakSummary` still treats
+  // it as a synthesized placeholder (a failure promotes its error instead).
+  const fields = Object.entries(toolInput)
+    .map(([key, value]) => describeField(key, value))
+    .join(', ')
+  return fields ? `‹${fields}›` : ''
+}
+
+/** One token describing a StructuredOutput field for the count fallback:
+ *  arrays show their length, nested objects their key count, scalars their
+ *  value, and empty/nullish values just the key name. */
+function describeField(key: string, value: unknown): string {
+  if (Array.isArray(value)) return `${key}: ${value.length}`
+  if (value && typeof value === 'object') return `${key}: {${Object.keys(value).length}}`
+  if (typeof value === 'string') {
+    const t = oneLine(value)
+    return t ? `${key}: ${t}` : key
+  }
+  if (value === null || value === undefined) return key
+  return `${key}: ${value}`
+}
+
+/** A summary that carries no real information: empty, too short, or a
+ *  synthesized field-breakdown placeholder (anything wrapped in guillemets,
+ *  e.g. `‹findings: 8›`). Used to decide whether a tool failure should
+ *  overwrite the row summary with its error. Tests `startsWith` rather than a
+ *  full match so a truncated placeholder is still recognized. */
+export function isWeakSummary(s: string | undefined | null): boolean {
+  if (!s) return true
+  const t = s.trim()
+  return t.length < 3 || t.startsWith('‹')
+}
+
+/** Truncate with an ellipsis when over `max` characters. */
+export function truncate(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max) + '...' : s
+}
+
+function getToolSummary(
+  toolName: string | null,
+  toolInput: Record<string, any> | undefined,
+  cwd: string | undefined,
+): string {
+  if (!toolInput) return ''
+  switch (toolName) {
+    case 'Bash': {
+      const desc = toolInput.description as string | undefined
+      const cmd = toolInput.command as string | undefined
+      const bin = cmd ? extractBashBinary(cmd) : null
+      const binPrefix = bin ? `[${bin}] ` : ''
+      if (desc) return `${binPrefix}${desc}`
+      return cmd ? `${binPrefix}${cmd.replace(/\s*\n\s*/g, ' \\n ').trim()}` : ''
+    }
+    case 'Read':
+    case 'Write':
+      return relativePath(toolInput.file_path, cwd)
+    case 'Edit': {
+      const fp = relativePath(toolInput.file_path, cwd)
+      const oldStr = toolInput.old_string as string | undefined
+      if (fp && oldStr) return `${fp}`
+      return fp
+    }
+    case 'Grep': {
+      const pattern = toolInput.pattern
+      const path = toolInput.path
+      const rp = path ? relativePath(path, cwd) : ''
+      if (pattern && rp) return `/${pattern}/ in ${rp}`
+      if (pattern) return `/${pattern}/`
+      return ''
+    }
+    case 'Glob':
+      return toolInput.pattern || ''
+    case 'Agent':
+      return toolInput.description || toolInput.prompt || ''
+    case 'StructuredOutput':
+      return structuredOutputSummary(toolInput)
+    case 'Skill':
+      return toolInput.skill || ''
+    case 'Workflow': {
+      const name = typeof toolInput.name === 'string' ? toolInput.name : ''
+      const wfArgs = typeof toolInput.args === 'string' ? toolInput.args : ''
+      if (name && wfArgs) return `${name}: ${oneLine(wfArgs)}`
+      return name || oneLine(wfArgs)
+    }
+    case 'WebSearch':
+    case 'WebFetch':
+      return toolInput.query || toolInput.url || ''
+    case 'NotebookEdit':
+      return relativePath(toolInput.notebook_path, cwd)
+    default:
+      return toolInput.description || toolInput.command || toolInput.query || ''
+  }
+}
+
+/** Build pre-computed searchText from an event and its summary.
+ *  toolName is passed since it's derived per agent class. */
+export function buildSearchText(event: RawEvent, summary: string, toolName: string | null): string {
+  const parts: string[] = [summary]
+  if (toolName) parts.push(toolName)
+  if (event.hookName) parts.push(event.hookName)
+
+  const p = event.payload as Record<string, any>
+  if (p.tool_input?.command) parts.push(p.tool_input.command)
+  if (p.tool_input?.file_path) parts.push(p.tool_input.file_path)
+  if (p.tool_input?.pattern) parts.push(p.tool_input.pattern)
+  if (p.tool_input?.description) parts.push(p.tool_input.description)
+  if (p.prompt) parts.push(p.prompt)
+  if (p.error) parts.push(p.error)
+
+  return parts.filter(Boolean).join(' ').toLowerCase()
+}
